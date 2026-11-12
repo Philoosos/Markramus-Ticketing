@@ -1,0 +1,304 @@
+// PostgreSQL application model. Seat identifiers are imported only from the owner-approved canonical manifest.
+// Do not create seat rows from illustrative examples or map images.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  BOOKING_OFFICER
+  SCANNER
+}
+
+enum BookingChannel {
+  ONLINE
+  GROUP
+  TEAM
+  VIP
+}
+
+enum BookingStatus {
+  DRAFT
+  HELD
+  PAYMENT_REVIEW
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum PaymentMethod {
+  ONLINE_GATEWAY
+  CASH
+  INSTAPAY
+  FREE
+  OTHER
+}
+
+enum PaymentStatus {
+  NOT_PAID
+  PENDING
+  PROOF_SUBMITTED
+  VERIFIED
+  FAILED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum PerformanceSeatStatus {
+  AVAILABLE
+  HELD
+  SOLD
+  BLOCKED
+}
+
+enum TicketStatus {
+  ISSUED
+  USED
+  CANCELLED
+  REFUNDED
+}
+
+enum GroupAffiliation {
+  SPECIFIC_ACTOR
+  TEAM
+  GENERAL_AUDIENCE
+}
+
+enum ApprovalStatus {
+  NOT_REQUESTED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id                 String       @id @default(cuid())
+  loginId            String       @unique
+  fullName           String
+  passwordHash       String
+  role               UserRole
+  isActive           Boolean      @default(true)
+  mustChangePassword Boolean      @default(false)
+  temporaryPasswordIssuedAt DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  bookings           Booking[]    @relation("BookingOfficer")
+  approvedBookings   Booking[]    @relation("BookingApprover")
+  auditEvents        AuditEvent[]
+  sessions           AuthSession[]
+  ticketScans        TicketScan[]
+  initialSetup       InitialSetup?
+}
+
+// Singleton row written in the same transaction as the first Super Admin.
+// Its constant primary key makes concurrent first-run requests mutually exclusive.
+model InitialSetup {
+  id           String   @id @default("initial")
+  superAdminId String   @unique
+  completedAt  DateTime @default(now())
+  superAdmin   User     @relation(fields: [superAdminId], references: [id], onDelete: Restrict)
+}
+
+model AuthAttempt {
+  id          String   @id @default(cuid())
+  loginKey    String
+  addressKey  String
+  attemptedAt DateTime @default(now())
+
+  @@index([loginKey, attemptedAt])
+  @@index([addressKey, attemptedAt])
+}
+
+model AuthSession {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model Production {
+  id          String        @id @default(cuid())
+  slug        String        @unique
+  title       String
+  description String        @default("")
+  status      String        @default("DRAFT")
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  performances Performance[]
+}
+
+model Performance {
+  id          String           @id @default(cuid())
+  productionId String
+  startsAt    DateTime
+  status      String           @default("SCHEDULED")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  production  Production       @relation(fields: [productionId], references: [id], onDelete: Restrict)
+  seats       PerformanceSeat[]
+  bookings    Booking[]
+
+  @@index([productionId, startsAt])
+}
+
+model Seat {
+  id           String            @id @default(cuid())
+  seatCode     String            @unique
+  area         String
+  rowLabel     String
+  side         String
+  seatNumber   Int
+  isActive     Boolean           @default(true)
+  performanceSeats PerformanceSeat[]
+
+  @@index([area, rowLabel, side, seatNumber])
+}
+
+model PerformanceSeat {
+  id            String                @id @default(cuid())
+  performanceId String
+  seatId        String
+  status        PerformanceSeatStatus @default(AVAILABLE)
+  ticketPrice   Decimal               @db.Decimal(10, 2)
+  holdExpiresAt DateTime?
+  bookingId     String?
+  performance   Performance           @relation(fields: [performanceId], references: [id], onDelete: Restrict)
+  seat          Seat                  @relation(fields: [seatId], references: [id], onDelete: Restrict)
+  booking       Booking?              @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  ticket        Ticket?
+
+  @@unique([performanceId, seatId])
+  @@index([performanceId, status])
+  @@index([status, holdExpiresAt])
+  @@index([bookingId])
+}
+
+model Booking {
+  id                    String          @id @default(cuid())
+  reference             String          @unique
+  channel               BookingChannel
+  status                BookingStatus   @default(DRAFT)
+  performanceId         String
+  officerId             String?
+  approvedById          String?
+  customerName          String?
+  customerPhone         String?
+  customerBackupPhone   String?
+  customerEmail         String?
+  customerReligion      String?
+  groupContactName      String?
+  groupAffiliation      GroupAffiliation?
+  actorName             String?
+  identityCheckStatus   String          @default("NOT_REQUIRED")
+  approvalStatus        ApprovalStatus  @default(NOT_REQUESTED)
+  approvalReason        String?
+  approvedAt            DateTime?
+  subtotal              Decimal         @db.Decimal(10, 2)
+  discountAmount        Decimal         @default(0) @db.Decimal(10, 2)
+  totalAmount           Decimal         @db.Decimal(10, 2)
+  amountReceived        Decimal         @default(0) @db.Decimal(10, 2)
+  paymentMethod         PaymentMethod?
+  paymentStatus         PaymentStatus   @default(NOT_PAID)
+  paymentReference      String?
+  holdExpiresAt         DateTime?
+  createdAt             DateTime        @default(now())
+  confirmedAt           DateTime?
+  cancelledAt           DateTime?
+  performance           Performance     @relation(fields: [performanceId], references: [id], onDelete: Restrict)
+  officer                User?           @relation("BookingOfficer", fields: [officerId], references: [id], onDelete: Restrict)
+  approvedBy             User?           @relation("BookingApprover", fields: [approvedById], references: [id], onDelete: Restrict)
+  performanceSeats      PerformanceSeat[]
+  tickets                Ticket[]
+  payments               PaymentRecord[]
+  identityDocuments      IdentityDocument[]
+
+  @@index([performanceId, status])
+  @@index([officerId, createdAt])
+  @@index([paymentStatus, createdAt])
+  @@index([groupAffiliation, actorName])
+}
+
+model PaymentRecord {
+  id              String        @id @default(cuid())
+  bookingId       String
+  method          PaymentMethod
+  status          PaymentStatus
+  amount          Decimal       @db.Decimal(10, 2)
+  provider        String?
+  providerReference String?
+  verifiedById    String?
+  verifiedAt      DateTime?
+  receivedAt      DateTime?
+  proofStorageKey String?
+  createdAt       DateTime      @default(now())
+  booking         Booking       @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId, status])
+  @@index([provider, providerReference])
+}
+
+model Ticket {
+  id                String            @id @default(cuid())
+  bookingId         String
+  performanceSeatId String            @unique
+  tokenHash         String            @unique
+  status            TicketStatus      @default(ISSUED)
+  issuedAt          DateTime          @default(now())
+  booking           Booking           @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  performanceSeat   PerformanceSeat   @relation(fields: [performanceSeatId], references: [id], onDelete: Restrict)
+  scans             TicketScan[]
+
+  @@index([bookingId])
+}
+
+model TicketScan {
+  id         String   @id @default(cuid())
+  ticketId   String
+  scannedById String
+  scannedAt  DateTime @default(now())
+  result     String
+  ticket     Ticket   @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  scannedBy  User     @relation(fields: [scannedById], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, scannedAt])
+}
+
+model IdentityDocument {
+  id             String   @id @default(cuid())
+  bookingId      String
+  storageKey     String   @unique
+  documentStatus String
+  uploadedAt     DateTime @default(now())
+  deleteAfter    DateTime?
+  booking        Booking  @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([deleteAfter])
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  beforeData Json?
+  afterData  Json?
+  createdAt  DateTime @default(now())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+}
